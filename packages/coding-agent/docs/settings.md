@@ -142,6 +142,9 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+| `images.imageStoragePath` | string | OS temp dir | Directory for clipboard-pasted images. The directory must already exist and be writable. |
+
+`images.imageStoragePath` supports absolute paths and `~`. Relative paths are interpreted relative to the current working directory. Pi does not create this directory and does not automatically delete pasted image files.
 
 ### Shell
 

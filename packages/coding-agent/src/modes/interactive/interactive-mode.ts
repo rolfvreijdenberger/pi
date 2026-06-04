@@ -116,7 +116,7 @@ import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
-import { SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { DEFAULT_IMAGE_STORAGE_LABEL, SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
@@ -2466,24 +2466,54 @@ export class InteractiveMode {
 	}
 
 	private async handleClipboardImagePaste(): Promise<void> {
+		let image: Awaited<ReturnType<typeof readClipboardImage>>;
 		try {
-			const image = await readClipboardImage();
-			if (!image) {
-				return;
-			}
+			image = await readClipboardImage();
+		} catch {
+			// Silently ignore clipboard read errors (may not have permission, etc.).
+			return;
+		}
+		if (!image) {
+			return;
+		}
 
-			// Write to temp file
-			const tmpDir = os.tmpdir();
+		const storageDir = this.settingsManager.getImageStoragePath();
+		let storageStats: fs.Stats;
+		try {
+			storageStats = fs.statSync(storageDir);
+		} catch (error) {
+			const code = error && typeof error === "object" && "code" in error ? String(error.code) : undefined;
+			if (code === "ENOENT") {
+				this.showWarning(`Clipboard image storage directory does not exist: ${storageDir}`);
+			} else {
+				const message = error instanceof Error ? error.message : String(error);
+				this.showWarning(`Failed to access clipboard image storage directory ${storageDir}: ${message}`);
+			}
+			return;
+		}
+		if (!storageStats.isDirectory()) {
+			this.showWarning(`Clipboard image storage path is not a directory: ${storageDir}`);
+			return;
+		}
+		try {
+			fs.accessSync(storageDir, fs.constants.W_OK);
+		} catch {
+			this.showWarning(`Clipboard image storage directory is not writable: ${storageDir}`);
+			return;
+		}
+
+		try {
 			const ext = extensionForImageMimeType(image.mimeType) ?? "png";
 			const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
-			const filePath = path.join(tmpDir, fileName);
+			const filePath = path.join(storageDir, fileName);
 			fs.writeFileSync(filePath, Buffer.from(image.bytes));
 
 			// Insert file path directly
 			this.editor.insertTextAtCursor?.(filePath);
 			this.ui.requestRender();
-		} catch {
-			// Silently ignore clipboard errors (may not have permission, etc.)
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showWarning(`Failed to paste clipboard image: ${message}`);
 		}
 	}
 
@@ -3902,6 +3932,7 @@ export class InteractiveMode {
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
+					imageStoragePath: this.settingsManager.getConfiguredImageStoragePath() ?? DEFAULT_IMAGE_STORAGE_LABEL,
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
@@ -3950,6 +3981,9 @@ export class InteractiveMode {
 					},
 					onBlockImagesChange: (blocked) => {
 						this.settingsManager.setBlockImages(blocked);
+					},
+					onImageStoragePathChange: (imageStoragePath) => {
+						this.settingsManager.setImageStoragePath(imageStoragePath);
 					},
 					onEnableSkillCommandsChange: (enabled) => {
 						this.settingsManager.setEnableSkillCommands(enabled);

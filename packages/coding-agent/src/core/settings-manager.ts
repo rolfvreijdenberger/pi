@@ -1,5 +1,6 @@
 import type { Transport } from "@earendil-works/pi-ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -40,6 +41,7 @@ export interface TerminalSettings {
 export interface ImageSettings {
 	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
 	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+	imageStoragePath?: string; // custom directory for clipboard-pasted images (default: OS temp dir)
 }
 
 export interface ThinkingBudgetsSettings {
@@ -1010,6 +1012,28 @@ export class SettingsManager {
 		}
 		this.globalSettings.images.blockImages = blocked;
 		this.markModified("images", "blockImages");
+		this.save();
+	}
+
+	getConfiguredImageStoragePath(): string | undefined {
+		const path = this.settings.images?.imageStoragePath;
+		return path ? normalizePath(path) : undefined;
+	}
+
+	getImageStoragePath(): string {
+		return this.getConfiguredImageStoragePath() ?? normalizePath(tmpdir());
+	}
+
+	setImageStoragePath(path: string | undefined): void {
+		if (!this.globalSettings.images) {
+			this.globalSettings.images = {};
+		}
+		if (path === undefined) {
+			delete this.globalSettings.images.imageStoragePath;
+		} else {
+			this.globalSettings.images.imageStoragePath = path;
+		}
+		this.markModified("images", "imageStoragePath");
 		this.save();
 	}
 

@@ -3,6 +3,7 @@ import type { Transport } from "@earendil-works/pi-ai";
 import {
 	Container,
 	getCapabilities,
+	Input,
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
@@ -31,12 +32,15 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	xhigh: "Maximum reasoning (~32k tokens)",
 };
 
+export const DEFAULT_IMAGE_STORAGE_LABEL = "OS temp dir";
+
 export interface SettingsConfig {
 	autoCompact: boolean;
 	showImages: boolean;
 	imageWidthCells: number;
 	autoResizeImages: boolean;
 	blockImages: boolean;
+	imageStoragePath: string;
 	enableSkillCommands: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
@@ -66,6 +70,7 @@ export interface SettingsCallbacks {
 	onImageWidthCellsChange: (width: number) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
+	onImageStoragePathChange: (path: string | undefined) => void;
 	onEnableSkillCommandsChange: (enabled: boolean) => void;
 	onSteeringModeChange: (mode: "all" | "one-at-a-time") => void;
 	onFollowUpModeChange: (mode: "all" | "one-at-a-time") => void;
@@ -195,6 +200,40 @@ class SelectSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.selectList.handleInput(data);
+	}
+}
+
+class PathInputSubmenu extends Container {
+	private input: Input;
+
+	constructor(
+		title: string,
+		description: string,
+		currentValue: string,
+		onSubmit: (value: string) => void,
+		onCancel: () => void,
+	) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", description), 0, 0));
+		this.addChild(new Spacer(1));
+
+		this.input = new Input();
+		this.input.setValue(currentValue === DEFAULT_IMAGE_STORAGE_LABEL ? "" : currentValue);
+		this.input.onSubmit = (value) => onSubmit(value.trim());
+		this.input.onEscape = onCancel;
+		this.addChild(this.input);
+
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(theme.fg("dim", `  Enter to save · empty for ${DEFAULT_IMAGE_STORAGE_LABEL} · Esc to go back`), 0, 0),
+		);
+	}
+
+	handleInput(data: string): void {
+		this.input.handleInput(data);
 	}
 }
 
@@ -397,9 +436,25 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		// Skill commands toggle (insert after block-images)
 		const blockImagesIndex = items.findIndex((item) => item.id === "block-images");
 		items.splice(blockImagesIndex + 1, 0, {
+			id: "image-storage-path",
+			label: "Image storage path",
+			description: "Directory for clipboard-pasted images. Must already exist and be writable.",
+			currentValue: config.imageStoragePath,
+			submenu: (currentValue, done) =>
+				new PathInputSubmenu(
+					"Image Storage Path",
+					`Directory for clipboard-pasted images. Leave empty to use ${DEFAULT_IMAGE_STORAGE_LABEL}.`,
+					currentValue,
+					(value) => done(value || DEFAULT_IMAGE_STORAGE_LABEL),
+					() => done(),
+				),
+		});
+
+		// Skill commands toggle (insert after image-storage-path)
+		const imageStoragePathIndex = items.findIndex((item) => item.id === "image-storage-path");
+		items.splice(imageStoragePathIndex + 1, 0, {
 			id: "skill-commands",
 			label: "Skill commands",
 			description: "Register skills as /skill:name commands",
@@ -481,6 +536,9 @@ export class SettingsSelectorComponent extends Container {
 					case "block-images":
 						callbacks.onBlockImagesChange(newValue === "true");
 						break;
+					case "image-storage-path":
+						callbacks.onImageStoragePathChange(newValue === DEFAULT_IMAGE_STORAGE_LABEL ? undefined : newValue);
+						break;
 					case "skill-commands":
 						callbacks.onEnableSkillCommandsChange(newValue === "true");
 						break;
@@ -513,7 +571,7 @@ export class SettingsSelectorComponent extends Container {
 						callbacks.onEnableInstallTelemetryChange(newValue === "true");
 						break;
 					case "double-escape-action":
-						callbacks.onDoubleEscapeActionChange(newValue as "fork" | "tree");
+						callbacks.onDoubleEscapeActionChange(newValue as "fork" | "tree" | "none");
 						break;
 					case "tree-filter-mode":
 						callbacks.onTreeFilterModeChange(
