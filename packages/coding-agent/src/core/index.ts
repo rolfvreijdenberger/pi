@@ -73,5 +73,7 @@ export {
 	type TurnEndEvent,
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
+	type WorkingLoaderComponent,
+	type WorkingLoaderFactory,
 } from "./extensions/index.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";

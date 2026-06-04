@@ -2127,7 +2127,7 @@ Extensions can interact with users via `ctx.ui` methods and customize how messag
 - Async operations with cancel (BorderedLoader)
 - Settings toggles (SettingsList)
 - Status indicators (setStatus)
-- Working message, visibility, and indicator during streaming (`setWorkingMessage`, `setWorkingVisible`, `setWorkingIndicator`)
+- Working message, visibility, and indicator during streaming (`setWorkingMessage`, `setWorkingVisible`, `setWorkingIndicator`, `setWorkingComponent`)
 - Widgets above/below editor (setWidget)
 - Autocomplete providers layered on top of built-in slash/path completion (addAutocompleteProvider)
 - Custom footers (setFooter)
@@ -2228,6 +2228,20 @@ ctx.ui.setWorkingIndicator({
 });
 ctx.ui.setWorkingIndicator({ frames: [] });  // Hide indicator
 ctx.ui.setWorkingIndicator();  // Restore default spinner
+
+// Custom working loader factory (full control over spinner + message).
+// Prefer registering this from session_start so the factory is ready before
+// interactive mode creates the working loader for each agent_start.
+ctx.ui.setWorkingComponent((tui, theme) =>
+  new Loader(
+    tui,
+    (spinner) => theme.fg("warning", spinner),
+    (text) => theme.fg("accent", text),
+    "Custom message",
+    { frames: ["●"], intervalMs: 0 },
+  )
+);
+ctx.ui.setWorkingComponent(undefined);  // Restore default
 
 // Widget above editor (default)
 ctx.ui.setWidget("my-widget", ["Line 1", "Line 2"]);
@@ -2587,6 +2601,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | **UI Components** |||
 | `status-line.ts` | Footer status indicator | `setStatus`, session events |
 | `working-indicator.ts` | Customize the streaming working indicator | `setWorkingIndicator`, `registerCommand` |
+| `working-component.ts` | Custom working loader factory with full control over spinner, message, and colors | `setWorkingComponent` |
 | `github-issue-autocomplete.ts` | Add `#1234` issue completions on top of built-in autocomplete by preloading recent open issues from `gh issue list` | `addAutocompleteProvider`, `on("session_start")`, `exec` |
 | `custom-footer.ts` | Replace footer entirely | `registerCommand`, `setFooter` |
 | `custom-header.ts` | Replace startup header | `on("session_start")`, `setHeader` |

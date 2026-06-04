@@ -117,6 +117,16 @@ export interface WorkingIndicatorOptions {
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
 
+/** Custom working loader component shown during streaming. */
+export interface WorkingLoaderComponent extends Component {
+	stop(): void;
+	setMessage(message: string): void;
+	setIndicator(options?: WorkingIndicatorOptions): void;
+}
+
+/** Factory for custom working loader component shown during streaming. */
+export type WorkingLoaderFactory = (tui: TUI, theme: Theme) => WorkingLoaderComponent;
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -155,6 +165,13 @@ export interface ExtensionUIContext {
 	 * - Custom frames are rendered as provided, so extensions must add their own colors.
 	 */
 	setWorkingIndicator(options?: WorkingIndicatorOptions): void;
+
+	/**
+	 * Set a custom working loader factory. Extensions that call this own full
+	 * control over spinner color, message color, indicator frames, and message
+	 * text. Call with undefined to restore the built-in loader.
+	 */
+	setWorkingComponent(factory: WorkingLoaderFactory | undefined): void;
 
 	/** Set the label shown for hidden thinking blocks. Call with no argument to restore default. */
 	setHiddenThinkingLabel(label?: string): void;

@@ -155,6 +155,8 @@ export type {
 	UserBashEventResult,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
+	WorkingLoaderComponent,
+	WorkingLoaderFactory,
 	WriteToolCallEvent,
 	WriteToolResultEvent,
 } from "./types.ts";

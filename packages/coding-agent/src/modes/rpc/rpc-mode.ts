@@ -18,6 +18,7 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
+	WorkingLoaderFactory,
 } from "../../core/extensions/index.ts";
 import {
 	flushRawStdout,
@@ -185,6 +186,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		setWorkingIndicator(_options?: WorkingIndicatorOptions): void {
 			// Working indicator customization not supported in RPC mode - requires TUI loader access
+		},
+
+		setWorkingComponent(_factory?: WorkingLoaderFactory): void {
+			// Working component customization not supported in RPC mode - requires TUI loader access
 		},
 
 		setHiddenThinkingLabel(_label?: string): void {

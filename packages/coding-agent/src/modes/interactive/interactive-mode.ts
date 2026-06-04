@@ -70,6 +70,8 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
+	WorkingLoaderComponent,
+	WorkingLoaderFactory,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
@@ -278,10 +280,11 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
-	private loadingAnimation: Loader | undefined = undefined;
+	private loadingAnimation: WorkingLoaderComponent | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
+	private workingLoaderFactory: WorkingLoaderFactory | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -1713,7 +1716,10 @@ export class InteractiveMode {
 		return this.workingMessage ?? this.defaultWorkingMessage;
 	}
 
-	private createWorkingLoader(): Loader {
+	private createWorkingLoader(): WorkingLoaderComponent {
+		if (this.workingLoaderFactory) {
+			return this.workingLoaderFactory(this.ui, theme);
+		}
 		return new Loader(
 			this.ui,
 			(spinner) => theme.fg("accent", spinner),
@@ -1749,6 +1755,18 @@ export class InteractiveMode {
 	private setWorkingIndicator(options?: LoaderIndicatorOptions): void {
 		this.workingIndicatorOptions = options;
 		this.loadingAnimation?.setIndicator(options);
+		this.ui.requestRender();
+	}
+
+	private setExtensionWorkingComponent(factory: WorkingLoaderFactory | undefined): void {
+		this.workingLoaderFactory = factory;
+		if (this.loadingAnimation) {
+			this.stopWorkingLoader();
+		}
+		if (this.session.isStreaming && this.workingVisible) {
+			this.loadingAnimation = this.createWorkingLoader();
+			this.statusContainer.addChild(this.loadingAnimation);
+		}
 		this.ui.requestRender();
 	}
 
@@ -1846,7 +1864,8 @@ export class InteractiveMode {
 		this.updateTerminalTitle();
 		this.workingMessage = undefined;
 		this.workingVisible = true;
-		this.setWorkingIndicator();
+		this.workingIndicatorOptions = undefined;
+		this.setExtensionWorkingComponent(undefined);
 		if (this.loadingAnimation) {
 			this.loadingAnimation.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
 		}
@@ -2003,6 +2022,7 @@ export class InteractiveMode {
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
 			setWorkingIndicator: (options) => this.setWorkingIndicator(options),
+			setWorkingComponent: (factory) => this.setExtensionWorkingComponent(factory),
 			setHiddenThinkingLabel: (label) => this.setHiddenThinkingLabel(label),
 			setWidget: (key, content, options) => this.setExtensionWidget(key, content, options),
 			setFooter: (factory) => this.setExtensionFooter(factory),

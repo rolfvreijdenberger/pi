@@ -774,6 +774,36 @@ This only affects the normal streaming working indicator. Compaction and retry l
 
 **Examples:** [working-indicator.ts](../examples/extensions/working-indicator.ts)
 
+### Pattern 4c: Custom Working Component
+
+Replace the full streaming working loader when the indicator/message color callbacks are not enough. The factory receives the TUI instance and current theme, and must return a component with `stop()`, `setMessage()`, and `setIndicator()` methods.
+
+Register the factory at session scope so interactive mode can instantiate it at the normal `agent_start` point.
+
+```typescript
+import { Loader } from "@earendil-works/pi-tui";
+
+pi.on("session_start", (_event, ctx) => {
+  ctx.ui.setWorkingComponent((tui, theme) =>
+    new Loader(
+      tui,
+      (spinner) => theme.fg("warning", spinner),
+      (text) => theme.fg("accent", text),
+      "Working...",
+      { frames: ["●"], intervalMs: 0 },
+    )
+  );
+});
+
+pi.on("session_shutdown", (_event, ctx) => {
+  ctx.ui.setWorkingComponent(undefined); // restore default loader
+});
+```
+
+Use this only for TUI mode. In RPC, JSON, and print modes it is a no-op. Keep returned components width-safe and stop any timers in `stop()`. Use `agent_start`/`agent_end` only for per-run state such as timers or message updates; do not re-register the factory on every `agent_start`.
+
+**Examples:** [working-component.ts](../examples/extensions/working-component.ts)
+
 ### Pattern 5: Widgets Above/Below Editor
 
 Show persistent content above or below the input editor. Good for todo lists, progress.
@@ -921,6 +951,7 @@ export default function (pi: ExtensionAPI) {
 - **Settings toggles**: [examples/extensions/tools.ts](../examples/extensions/tools.ts) - SettingsList for tool enable/disable
 - **Status indicators**: [examples/extensions/plan-mode.ts](../examples/extensions/plan-mode.ts) - setStatus and setWidget
 - **Working indicator**: [examples/extensions/working-indicator.ts](../examples/extensions/working-indicator.ts) - setWorkingIndicator
+- **Custom working component**: [examples/extensions/working-component.ts](../examples/extensions/working-component.ts) - setWorkingComponent
 - **Custom footer**: [examples/extensions/custom-footer.ts](../examples/extensions/custom-footer.ts) - setFooter with stats
 - **Custom editor**: [examples/extensions/modal-editor.ts](../examples/extensions/modal-editor.ts) - Vim-like modal editing
 - **Snake game**: [examples/extensions/snake.ts](../examples/extensions/snake.ts) - Full game with keyboard input, game loop

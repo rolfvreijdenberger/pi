@@ -4,7 +4,11 @@ import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earend
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, TUI } from "../../tui/src/tui.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
+import type {
+	AutocompleteProviderFactory,
+	WorkingIndicatorOptions,
+	WorkingLoaderComponent,
+} from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -17,6 +21,35 @@ function renderLastLine(container: Container, width = 120): string {
 
 function renderAll(container: Container, width = 120): string {
 	return container.children.flatMap((child) => child.render(width)).join("\n");
+}
+
+class TestWorkingLoader implements WorkingLoaderComponent {
+	stopped = false;
+	messages: string[] = [];
+	indicators: Array<WorkingIndicatorOptions | undefined> = [];
+	private readonly label: string;
+
+	constructor(label: string) {
+		this.label = label;
+	}
+
+	stop(): void {
+		this.stopped = true;
+	}
+
+	setMessage(message: string): void {
+		this.messages.push(message);
+	}
+
+	setIndicator(options?: WorkingIndicatorOptions): void {
+		this.indicators.push(options);
+	}
+
+	render(_width: number): string[] {
+		return [this.label];
+	}
+
+	invalidate(): void {}
 }
 
 class TestFocusableComponent implements Component, Focusable {
@@ -134,6 +167,89 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode working loader customization", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	function createWorkingLoaderThis(): any {
+		return Object.assign(Object.create(InteractiveMode.prototype), {
+			defaultWorkingMessage: "Working...",
+			loadingAnimation: undefined,
+			runtimeHost: { session: { isStreaming: true } },
+			statusContainer: new Container(),
+			ui: { hideOverlay: vi.fn(), requestRender: vi.fn() },
+			workingIndicatorOptions: undefined,
+			workingLoaderFactory: undefined,
+			workingMessage: undefined,
+			workingVisible: true,
+		});
+	}
+
+	test("replaces and restores the streaming working loader", () => {
+		const fakeThis = createWorkingLoaderThis();
+		const customLoader = new TestWorkingLoader("custom-loader");
+
+		try {
+			(InteractiveMode as any).prototype.setExtensionWorkingComponent.call(fakeThis, () => customLoader);
+
+			expect(fakeThis.loadingAnimation).toBe(customLoader);
+			expect(fakeThis.statusContainer.children).toEqual([customLoader]);
+			expect(renderAll(fakeThis.statusContainer)).toContain("custom-loader");
+
+			(InteractiveMode as any).prototype.setExtensionWorkingComponent.call(fakeThis, undefined);
+
+			expect(customLoader.stopped).toBe(true);
+			expect(fakeThis.workingLoaderFactory).toBeUndefined();
+			expect(fakeThis.loadingAnimation).not.toBe(customLoader);
+			expect(renderAll(fakeThis.statusContainer)).toContain("Working...");
+		} finally {
+			fakeThis.loadingAnimation?.stop();
+		}
+	});
+
+	test("resetExtensionUI clears stale working loader factories", () => {
+		const fakeThis = Object.assign(createWorkingLoaderThis(), {
+			autocompleteProviderWrappers: [(current: AutocompleteProvider) => current],
+			clearExtensionTerminalInputListeners: vi.fn(),
+			clearExtensionWidgets: vi.fn(),
+			defaultEditor: { onExtensionShortcut: vi.fn() },
+			extensionEditor: undefined,
+			extensionInput: undefined,
+			extensionSelector: undefined,
+			footer: { invalidate: vi.fn() },
+			footerDataProvider: { clearExtensionStatuses: vi.fn() },
+			setCustomEditorComponent: vi.fn(),
+			setExtensionFooter: vi.fn(),
+			setExtensionHeader: vi.fn(),
+			setHiddenThinkingLabel: vi.fn(),
+			setupAutocompleteProvider: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+			workingIndicatorOptions: { frames: ["x"] },
+			workingMessage: "Custom",
+			workingVisible: false,
+		});
+		const customLoader = new TestWorkingLoader("custom-loader");
+		fakeThis.loadingAnimation = customLoader;
+		fakeThis.workingLoaderFactory = () => customLoader;
+		fakeThis.statusContainer.addChild(customLoader);
+
+		try {
+			(InteractiveMode as any).prototype.resetExtensionUI.call(fakeThis);
+
+			expect(fakeThis.workingLoaderFactory).toBeUndefined();
+			expect(fakeThis.workingMessage).toBeUndefined();
+			expect(fakeThis.workingVisible).toBe(true);
+			expect(fakeThis.workingIndicatorOptions).toBeUndefined();
+			expect(customLoader.stopped).toBe(true);
+			expect(fakeThis.loadingAnimation).not.toBe(customLoader);
+			expect(renderAll(fakeThis.statusContainer)).toContain("Working...");
+		} finally {
+			fakeThis.loadingAnimation?.stop();
+		}
 	});
 });
 
