@@ -4,7 +4,9 @@ import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earend
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, TUI } from "../../tui/src/tui.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
+import type { ResourceLoader, StartupContextSourceStatus } from "../src/core/resource-loader.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -367,11 +369,45 @@ describe("InteractiveMode.showLoadedResources", () => {
 		toolOutputExpanded?: boolean;
 		cwd?: string;
 		contextFiles?: Array<{ path: string; content?: string }>;
+		systemPromptFile?: string;
+		appendSystemPromptFiles?: string[];
+		startupContextStatuses?: StartupContextSourceStatus[];
 		extensions?: ExtensionFixture[];
 		skills?: Array<{ filePath: string; name: string }>;
 		skillDiagnostics?: Array<{ type: "warning" | "error" | "collision"; message: string }>;
 		useRealScopeGroups?: boolean;
 	}) {
+		const startupContextStatuses = options.startupContextStatuses ?? [
+			...(options.systemPromptFile
+				? [
+						{
+							kind: "system",
+							status: "active",
+							origin: "project",
+							path: options.systemPromptFile,
+						} as const,
+					]
+				: []),
+			...(options.appendSystemPromptFiles ?? []).map(
+				(file): StartupContextSourceStatus => ({
+					kind: "append-system",
+					status: "active",
+					origin: "project",
+					path: file,
+				}),
+			),
+			...(options.contextFiles ?? []).map(
+				(file): StartupContextSourceStatus => ({
+					kind: "context",
+					status: "active",
+					origin: "project",
+					path: file.path,
+					contextKind: file.path.toLowerCase().endsWith("claude.md") ? "claude" : "agents",
+					fileName: file.path.toLowerCase().endsWith("claude.md") ? "CLAUDE.md" : "AGENTS.md",
+				}),
+			),
+		];
+
 		const fakeThis: any = {
 			options: { verbose: options.verbose ?? false },
 			toolOutputExpanded: options.toolOutputExpanded ?? false,
@@ -391,6 +427,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 				resourceLoader: {
 					getPathMetadata: () => new Map(),
 					getAgentsFiles: () => ({ agentsFiles: options.contextFiles ?? [] }),
+					getStartupContextSourceStatuses: () => startupContextStatuses,
 					getSkills: () => ({
 						skills: options.skills ?? [],
 						diagnostics: options.skillDiagnostics ?? [],
@@ -962,6 +999,129 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(output).toContain("~/.pi/agent/AGENTS.md");
 		expect(output).toContain("~/Development/pi-mono/AGENTS.md");
 		expect(output).not.toContain("~/.pi/agent/AGENTS.md, AGENTS.md");
+	});
+
+	test("supports legacy custom resource loaders returning plain agent instruction files", () => {
+		const cwd = "/tmp/project";
+		const legacyResourceLoader: ResourceLoader = {
+			getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({
+				agentsFiles: [{ path: path.join(cwd, "CLAUDE.md"), content: "Legacy instructions" }],
+			}),
+			getSystemPrompt: () => undefined,
+			getAppendSystemPrompt: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		};
+		const fakeThis = createShowLoadedResourcesThis({ quietStartup: false, cwd });
+		fakeThis.session.resourceLoader = legacyResourceLoader;
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
+		expect(output).toContain("[Context]");
+		expect(output).toContain("CLAUDE.md");
+	});
+
+	test("shows SYSTEM.md and APPEND_SYSTEM.md under [Context]", () => {
+		const home = homedir();
+		const cwd = path.join(home, "Development", "pi-mono");
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: false,
+			toolOutputExpanded: true,
+			cwd,
+			startupContextStatuses: [
+				{
+					kind: "system",
+					status: "overridden",
+					origin: "user",
+					path: path.join(home, ".pi", "agent", "SYSTEM.md"),
+				},
+				{
+					kind: "system",
+					status: "active",
+					origin: "project",
+					path: path.join(cwd, ".pi", "SYSTEM.md"),
+				},
+				{
+					kind: "append-system",
+					status: "active",
+					origin: "user",
+					path: path.join(home, ".pi", "agent", "APPEND_SYSTEM.md"),
+				},
+				{
+					kind: "context",
+					status: "active",
+					origin: "project",
+					path: path.join(cwd, "AGENTS.md"),
+					contextKind: "agents",
+					fileName: "AGENTS.md",
+				},
+			],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
+		expect(output).toContain("[Context]");
+
+		const systemOverriddenIndex = output.indexOf("~/.pi/agent/SYSTEM.md");
+		const systemActiveIndex = output.indexOf(".pi/SYSTEM.md");
+		const appendActiveIndex = output.indexOf("~/.pi/agent/APPEND_SYSTEM.md");
+		const agentsActiveIndex = output.indexOf("AGENTS.md");
+
+		expect(systemOverriddenIndex).toBeGreaterThan(-1);
+		expect(systemActiveIndex).toBeGreaterThan(-1);
+		expect(appendActiveIndex).toBeGreaterThan(-1);
+		expect(agentsActiveIndex).toBeGreaterThan(-1);
+
+		expect(systemOverriddenIndex).toBeLessThan(systemActiveIndex);
+		expect(systemActiveIndex).toBeLessThan(appendActiveIndex);
+		expect(appendActiveIndex).toBeLessThan(agentsActiveIndex);
+	});
+
+	test("shows CLI injected prompt labels without exposing literal contents", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: false,
+			startupContextStatuses: [
+				{ kind: "system", status: "overridden", origin: "user", path: "/tmp/agent/SYSTEM.md" },
+				{ kind: "system", status: "active", origin: "cli", label: "--system-prompt" },
+				{
+					kind: "append-system",
+					status: "active",
+					origin: "cli",
+					path: "/tmp/project/CLAUDE.md",
+					label: "--append-system-prompt #1",
+					index: 1,
+				},
+				{
+					kind: "context",
+					status: "active",
+					origin: "project",
+					path: "/tmp/project/AGENTS.md",
+					contextKind: "agents",
+					fileName: "AGENTS.md",
+				},
+			],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
+		expect(output).toContain("[Context]");
+		expect(output).toContain("--system-prompt");
+		expect(output).toContain("--append-system-prompt #1 CLAUDE.md");
+		expect(output).toContain("AGENTS.md");
+		expect(output).not.toContain("literal secret");
 	});
 
 	test("does not show verbose listing on quiet startup during reload", () => {

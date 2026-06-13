@@ -1,7 +1,7 @@
 /**
- * Context Files (AGENTS.md)
+ * Agent instruction files (AGENTS.md / CLAUDE.md)
  *
- * Context files provide project-specific instructions loaded into the system prompt.
+ * Agent instruction files provide project-specific instructions loaded into the system prompt.
  */
 
 import {
@@ -11,7 +11,7 @@ import {
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
-// Disable context files entirely by returning an empty list in agentsFilesOverride.
+// agentsFilesOverride can add, remove, or replace AGENTS.md / CLAUDE.md instructions before they are added to the system prompt.
 const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
@@ -32,9 +32,9 @@ const loader = new DefaultResourceLoader({
 });
 await loader.reload();
 
-// Discover AGENTS.md files walking up from cwd
+// Discover AGENTS.md / CLAUDE.md files walking up from cwd
 const discovered = loader.getAgentsFiles().agentsFiles;
-console.log("Discovered context files:");
+console.log("Discovered agent instruction files:");
 for (const file of discovered) {
 	console.log(`  - ${file.path} (${file.content.length} chars)`);
 }
@@ -43,5 +43,5 @@ const { session } = await createAgentSession({
 	resourceLoader: loader,
 	sessionManager: SessionManager.inMemory(),
 });
-console.log(`Session created with ${discovered.length + 1} context files`);
+console.log(`Session created with ${discovered.length} agent instruction files`);
 session.dispose();

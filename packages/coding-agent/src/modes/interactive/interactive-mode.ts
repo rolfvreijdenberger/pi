@@ -79,7 +79,11 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
-import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
+import {
+	normalizeAgentInstructionFile,
+	type ResourceDiagnostic,
+	type StartupContextSourceStatus,
+} from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -1383,16 +1387,41 @@ export class InteractiveMode {
 		}
 
 		if (showListing) {
-			const contextFiles = this.session.resourceLoader.getAgentsFiles().agentsFiles;
-			if (contextFiles.length > 0) {
+			const resourceLoader = this.session.resourceLoader;
+			const contextStatuses: StartupContextSourceStatus[] = resourceLoader.getStartupContextSourceStatuses
+				? resourceLoader.getStartupContextSourceStatuses()
+				: resourceLoader.getAgentsFiles().agentsFiles.map((file) => {
+						const agentInstructionFile = normalizeAgentInstructionFile(file);
+						return {
+							kind: "context" as const,
+							status: "active" as const,
+							origin: "project" as const,
+							path: agentInstructionFile.path,
+							contextKind: agentInstructionFile.contextKind,
+							fileName: agentInstructionFile.fileName,
+						};
+					});
+
+			if (contextStatuses.length > 0) {
 				this.chatContainer.addChild(new Spacer(1));
-				const contextList = contextFiles
-					.map((f) => theme.fg("dim", `  ${this.formatDisplayPath(f.path)}`))
-					.join("\n");
-				const contextCompactList = formatCompactList(
-					contextFiles.map((contextFile) => this.formatContextPath(contextFile.path)),
-					{ sort: false },
-				);
+
+				const contextLines = contextStatuses.map((item) => {
+					const displayPath = item.path ? this.formatDisplayPath(item.path) : undefined;
+					const label = "label" in item ? item.label : undefined;
+					const displayText = label ? (displayPath ? `${label} ${displayPath}` : label) : (displayPath ?? "");
+					const styledText = theme.fg("dim", displayText);
+					return `  ${item.status === "overridden" ? theme.strikethrough(styledText) : styledText}`;
+				});
+				const contextList = contextLines.join("\n");
+
+				const contextCompactLabels = contextStatuses.map((item) => {
+					const pathLabel = item.path ? this.formatContextPath(item.path) : undefined;
+					const itemLabel = "label" in item ? item.label : undefined;
+					const label = itemLabel ? (pathLabel ? `${itemLabel} ${pathLabel}` : itemLabel) : (pathLabel ?? "");
+					return item.status === "overridden" ? theme.strikethrough(label) : label;
+				});
+				const contextCompactList = formatCompactList(contextCompactLabels, { sort: false });
+
 				addLoadedSection("Context", contextCompactList, contextList);
 			}
 

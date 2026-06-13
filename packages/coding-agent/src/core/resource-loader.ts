@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
@@ -29,28 +29,98 @@ export interface ResourceLoaderReloadOptions {
 	resolveProjectTrust?: (input: { extensionsResult: LoadExtensionsResult }) => Promise<boolean>;
 }
 
+const AGENT_INSTRUCTION_FILE_CANDIDATES = [
+	{ fileName: "AGENTS.md", contextKind: "agents" },
+	{ fileName: "AGENTS.MD", contextKind: "agents" },
+	{ fileName: "CLAUDE.md", contextKind: "claude" },
+	{ fileName: "CLAUDE.MD", contextKind: "claude" },
+] as const;
+
+export type AgentInstructionFileName = (typeof AGENT_INSTRUCTION_FILE_CANDIDATES)[number]["fileName"];
+export type AgentInstructionFileKind = (typeof AGENT_INSTRUCTION_FILE_CANDIDATES)[number]["contextKind"];
+
+export interface AgentInstructionFile {
+	path: string;
+	content: string;
+	contextKind: AgentInstructionFileKind;
+	fileName: AgentInstructionFileName;
+}
+
+export type AgentInstructionFileInput =
+	| AgentInstructionFile
+	| {
+			path: string;
+			content: string;
+			contextKind?: AgentInstructionFileKind;
+			fileName?: AgentInstructionFileName;
+	  };
+
+type PromptFileKind = "system" | "append-system";
+
+type AgentInstructionFileStatus = {
+	kind: "context";
+	status: "active" | "overridden";
+	origin: "project" | "user";
+	path: string;
+	contextKind: AgentInstructionFileKind;
+	fileName: AgentInstructionFileName;
+};
+
+type PromptFileStatus = {
+	kind: PromptFileKind;
+	status: "active" | "overridden";
+	origin: "project" | "user";
+	path: string;
+};
+
+type CliPromptStatus = {
+	kind: PromptFileKind;
+	status: "active";
+	origin: "cli";
+	label: string;
+	path?: string;
+	index?: number;
+};
+
+export type StartupContextSourceStatus = AgentInstructionFileStatus | PromptFileStatus | CliPromptStatus;
+
 export interface ResourceLoader {
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
-	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
+	getAgentsFiles(): { agentsFiles: AgentInstructionFileInput[] };
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
+	getStartupContextSourceStatuses?(): StartupContextSourceStatus[];
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceLoaderReloadOptions): Promise<void>;
 }
 
-function resolvePromptInput(input: string | undefined, description: string): string | undefined {
+function isExistingFile(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+function pathIdentityKey(path: string): string {
+	const canonicalPath = canonicalizePath(resolve(path));
+	return process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
+}
+
+function resolvePromptInput(input: string | undefined, description: string, cwd: string): string | undefined {
 	if (!input) {
 		return undefined;
 	}
 
-	if (existsSync(input)) {
+	const resolvedInput = resolvePath(input, cwd, { trim: true });
+	if (isExistingFile(resolvedInput)) {
 		try {
-			return readFileSync(input, "utf-8");
+			return readFileSync(resolvedInput, "utf-8");
 		} catch (error) {
-			console.error(chalk.yellow(`Warning: Could not read ${description} file ${input}: ${error}`));
+			console.error(chalk.yellow(`Warning: Could not read ${description} file ${resolvedInput}: ${error}`));
 			return input;
 		}
 	}
@@ -58,50 +128,108 @@ function resolvePromptInput(input: string | undefined, description: string): str
 	return input;
 }
 
-function loadContextFileFromDir(dir: string): { path: string; content: string } | null {
-	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
-	for (const filename of candidates) {
-		const filePath = join(dir, filename);
-		if (existsSync(filePath)) {
-			try {
-				return {
-					path: filePath,
-					content: readFileSync(filePath, "utf-8"),
-				};
-			} catch (error) {
-				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
-			}
-		}
-	}
-	return null;
+type AgentInstructionFilesResult = {
+	files: AgentInstructionFile[];
+	statuses: StartupContextSourceStatus[];
+};
+
+type PromptSourceEntry = {
+	source: string;
+	index?: number;
+};
+
+type PromptFileStatusOptions = {
+	kind: PromptFileKind;
+	projectPath: string;
+	globalPath: string;
+	cliSourceEntries?: PromptSourceEntry[];
+};
+
+export function normalizeAgentInstructionFile(input: AgentInstructionFileInput): AgentInstructionFile {
+	const candidate =
+		AGENT_INSTRUCTION_FILE_CANDIDATES.find(
+			(candidate) => candidate.fileName === (input.fileName ?? basename(input.path)),
+		) ?? AGENT_INSTRUCTION_FILE_CANDIDATES[0];
+	return {
+		path: input.path,
+		content: input.content,
+		contextKind: input.contextKind ?? candidate.contextKind,
+		fileName: input.fileName ?? candidate.fileName,
+	};
 }
 
-export function loadProjectContextFiles(options: {
+function loadAgentInstructionFilesFromDir(
+	dir: string,
+	origin: "project" | "user",
+): { active: AgentInstructionFile | null; statuses: StartupContextSourceStatus[] } {
+	let active: AgentInstructionFile | null = null;
+	let activeStatus: StartupContextSourceStatus | undefined;
+	const overriddenStatuses: StartupContextSourceStatus[] = [];
+	const seenCandidates = new Set<string>();
+
+	for (const candidate of AGENT_INSTRUCTION_FILE_CANDIDATES) {
+		const filePath = join(dir, candidate.fileName);
+		if (!isExistingFile(filePath)) {
+			continue;
+		}
+		const canonicalPath = pathIdentityKey(filePath);
+		if (seenCandidates.has(canonicalPath)) {
+			continue;
+		}
+		seenCandidates.add(canonicalPath);
+
+		const fileInfo = { path: filePath, contextKind: candidate.contextKind, fileName: candidate.fileName };
+
+		if (active) {
+			overriddenStatuses.push({ kind: "context", status: "overridden", origin, ...fileInfo });
+			continue;
+		}
+
+		try {
+			active = { ...fileInfo, content: readFileSync(filePath, "utf-8") };
+			activeStatus = { kind: "context", status: "active", origin, ...fileInfo };
+		} catch (error) {
+			console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
+		}
+	}
+
+	const statuses = activeStatus ? [...overriddenStatuses.reverse(), activeStatus] : [];
+	return { active, statuses };
+}
+
+function loadProjectAgentInstructionFilesWithStatuses(options: {
 	cwd: string;
 	agentDir: string;
-}): Array<{ path: string; content: string }> {
+}): AgentInstructionFilesResult {
 	const resolvedCwd = resolvePath(options.cwd);
 	const resolvedAgentDir = resolvePath(options.agentDir);
 
-	const contextFiles: Array<{ path: string; content: string }> = [];
+	const agentInstructionFiles: AgentInstructionFile[] = [];
+	const contextStatuses: StartupContextSourceStatus[] = [];
 	const seenPaths = new Set<string>();
 
-	const globalContext = loadContextFileFromDir(resolvedAgentDir);
-	if (globalContext) {
-		contextFiles.push(globalContext);
-		seenPaths.add(globalContext.path);
+	const globalContext = loadAgentInstructionFilesFromDir(resolvedAgentDir, "user");
+	if (globalContext.active) {
+		agentInstructionFiles.push(globalContext.active);
+		contextStatuses.push(...globalContext.statuses);
+		seenPaths.add(pathIdentityKey(globalContext.active.path));
 	}
 
-	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
+	const ancestorAgentInstructionFiles: AgentInstructionFile[] = [];
+	const ancestorContextStatuses: StartupContextSourceStatus[][] = [];
 
 	let currentDir = resolvedCwd;
 	const root = resolve("/");
 
 	while (true) {
-		const contextFile = loadContextFileFromDir(currentDir);
-		if (contextFile && !seenPaths.has(contextFile.path)) {
-			ancestorContextFiles.unshift(contextFile);
-			seenPaths.add(contextFile.path);
+		const context = loadAgentInstructionFilesFromDir(currentDir, "project");
+		if (context.active) {
+			const contextPathKey = pathIdentityKey(context.active.path);
+			if (!seenPaths.has(contextPathKey)) {
+				ancestorAgentInstructionFiles.unshift(context.active);
+				ancestorContextStatuses.unshift(context.statuses);
+				seenPaths.add(contextPathKey);
+			}
 		}
 
 		if (currentDir === root) break;
@@ -111,9 +239,14 @@ export function loadProjectContextFiles(options: {
 		currentDir = parentDir;
 	}
 
-	contextFiles.push(...ancestorContextFiles);
+	agentInstructionFiles.push(...ancestorAgentInstructionFiles);
+	contextStatuses.push(...ancestorContextStatuses.flat());
 
-	return contextFiles;
+	return { files: agentInstructionFiles, statuses: contextStatuses };
+}
+
+export function loadProjectContextFiles(options: { cwd: string; agentDir: string }): AgentInstructionFile[] {
+	return loadProjectAgentInstructionFilesWithStatuses(options).files;
 }
 
 export interface DefaultResourceLoaderOptions {
@@ -146,8 +279,8 @@ export interface DefaultResourceLoaderOptions {
 		themes: Theme[];
 		diagnostics: ResourceDiagnostic[];
 	};
-	agentsFilesOverride?: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
-		agentsFiles: Array<{ path: string; content: string }>;
+	agentsFilesOverride?: (base: { agentsFiles: AgentInstructionFile[] }) => {
+		agentsFiles: AgentInstructionFileInput[];
 	};
 	systemPromptOverride?: (base: string | undefined) => string | undefined;
 	appendSystemPromptOverride?: (base: string[]) => string[];
@@ -184,8 +317,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		themes: Theme[];
 		diagnostics: ResourceDiagnostic[];
 	};
-	private agentsFilesOverride?: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
-		agentsFiles: Array<{ path: string; content: string }>;
+	private agentsFilesOverride?: (base: { agentsFiles: AgentInstructionFile[] }) => {
+		agentsFiles: AgentInstructionFileInput[];
 	};
 	private systemPromptOverride?: (base: string | undefined) => string | undefined;
 	private appendSystemPromptOverride?: (base: string[]) => string[];
@@ -197,9 +330,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private promptDiagnostics: ResourceDiagnostic[];
 	private themes: Theme[];
 	private themeDiagnostics: ResourceDiagnostic[];
-	private agentsFiles: Array<{ path: string; content: string }>;
+	private agentInstructionFiles: AgentInstructionFile[];
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
+	private startupContextStatuses: StartupContextSourceStatus[];
 	private lastSkillPaths: string[];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
 	private extensionPromptSourceInfos: Map<string, SourceInfo>;
@@ -237,6 +371,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.systemPromptOverride = options.systemPromptOverride;
 		this.appendSystemPromptOverride = options.appendSystemPromptOverride;
 
+		this.startupContextStatuses = [];
+
 		this.extensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 		this.skills = [];
 		this.skillDiagnostics = [];
@@ -244,7 +380,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.promptDiagnostics = [];
 		this.themes = [];
 		this.themeDiagnostics = [];
-		this.agentsFiles = [];
+		this.agentInstructionFiles = [];
 		this.appendSystemPrompt = [];
 		this.lastSkillPaths = [];
 		this.extensionSkillSourceInfos = new Map();
@@ -270,8 +406,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { themes: this.themes, diagnostics: this.themeDiagnostics };
 	}
 
-	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> } {
-		return { agentsFiles: this.agentsFiles };
+	getAgentsFiles(): { agentsFiles: AgentInstructionFile[] } {
+		return { agentsFiles: this.agentInstructionFiles };
 	}
 
 	getSystemPrompt(): string | undefined {
@@ -280,6 +416,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAppendSystemPrompt(): string[] {
 		return this.appendSystemPrompt;
+	}
+
+	getStartupContextSourceStatuses(): StartupContextSourceStatus[] {
+		return this.startupContextStatuses;
 	}
 
 	extendResources(paths: ResourceExtensionPaths): void {
@@ -449,32 +589,206 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
-		const agentsFiles = {
-			agentsFiles: this.noContextFiles
-				? []
-				: loadProjectContextFiles({
-						cwd: this.cwd,
-						agentDir: this.agentDir,
-					}),
-		};
+		const agentInstructions = this.noContextFiles
+			? { files: [], statuses: [] }
+			: loadProjectAgentInstructionFilesWithStatuses({
+					cwd: this.cwd,
+					agentDir: this.agentDir,
+				});
+		const agentsFiles = { agentsFiles: agentInstructions.files };
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
-		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
+		this.agentInstructionFiles = resolvedAgentsFiles.agentsFiles.map((file) => normalizeAgentInstructionFile(file));
 
-		const baseSystemPrompt = resolvePromptInput(
-			this.systemPromptSource ?? this.discoverSystemPromptFile(),
-			"system prompt",
-		);
+		this.startupContextStatuses = [];
+
+		const systemPromptPath = this.systemPromptSource ?? this.discoverSystemPromptFile();
+		this.addSystemPromptFileStatuses();
+
+		const baseSystemPrompt = resolvePromptInput(systemPromptPath, "system prompt", this.cwd);
 		this.systemPrompt = this.systemPromptOverride ? this.systemPromptOverride(baseSystemPrompt) : baseSystemPrompt;
 
-		const appendSources =
-			this.appendSystemPromptSource ??
-			(this.discoverAppendSystemPromptFile() ? [this.discoverAppendSystemPromptFile()!] : []);
-		const baseAppend = appendSources
-			.map((s) => resolvePromptInput(s, "append system prompt"))
+		const appendSourceEntries = this.getAppendSystemPromptSourceEntries();
+		this.addAppendSystemPromptFileStatuses(appendSourceEntries);
+		this.addAgentInstructionStatuses(agentInstructions.statuses, this.agentInstructionFiles);
+
+		const baseAppend = appendSourceEntries
+			.map((entry) => resolvePromptInput(entry.source, "append system prompt", this.cwd))
 			.filter((s): s is string => s !== undefined);
 		this.appendSystemPrompt = this.appendSystemPromptOverride
 			? this.appendSystemPromptOverride(baseAppend)
 			: baseAppend;
+	}
+
+	private resolvePromptSourceIfFile(source: string): string | undefined {
+		const resolvedSource = this.resolveResourcePath(source);
+		return isExistingFile(resolvedSource) ? resolve(resolvedSource) : undefined;
+	}
+
+	private getAppendSystemPromptSourceEntries(): PromptSourceEntry[] {
+		if (this.appendSystemPromptSource === undefined) {
+			const discoveredAppendSystemPromptFile = this.discoverAppendSystemPromptFile();
+			return discoveredAppendSystemPromptFile ? [{ source: discoveredAppendSystemPromptFile }] : [];
+		}
+
+		const entries: PromptSourceEntry[] = [];
+		const seenFilePaths = new Set<string>();
+		for (const [index, source] of this.appendSystemPromptSource.entries()) {
+			const filePath = this.resolvePromptSourceIfFile(source);
+			if (filePath) {
+				const key = pathIdentityKey(filePath);
+				if (seenFilePaths.has(key)) {
+					continue;
+				}
+				seenFilePaths.add(key);
+			}
+			entries.push({ source, index: index + 1 });
+		}
+		return entries;
+	}
+
+	private addSystemPromptFileStatuses(): void {
+		this.addPromptFileStatuses({
+			kind: "system",
+			projectPath: join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md"),
+			globalPath: join(this.agentDir, "SYSTEM.md"),
+			cliSourceEntries: this.systemPromptSource === undefined ? undefined : [{ source: this.systemPromptSource }],
+		});
+	}
+
+	private addAppendSystemPromptFileStatuses(appendSourceEntries: PromptSourceEntry[]): void {
+		this.addPromptFileStatuses({
+			kind: "append-system",
+			projectPath: join(this.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md"),
+			globalPath: join(this.agentDir, "APPEND_SYSTEM.md"),
+			cliSourceEntries: this.appendSystemPromptSource === undefined ? undefined : appendSourceEntries,
+		});
+	}
+
+	private addPromptFileStatuses(options: PromptFileStatusOptions): void {
+		const projectExists = isExistingFile(options.projectPath);
+		const globalExists = isExistingFile(options.globalPath);
+		const projectTrusted = this.settingsManager.isProjectTrusted();
+
+		if (options.cliSourceEntries) {
+			const activeCliPathKeys = new Set(
+				options.cliSourceEntries
+					.map((entry) => this.resolvePromptSourceIfFile(entry.source))
+					.filter((source): source is string => source !== undefined)
+					.map((source) => pathIdentityKey(source)),
+			);
+			this.addDiscoveredPromptStatusIfOverridden(
+				options.kind,
+				"user",
+				options.globalPath,
+				globalExists,
+				activeCliPathKeys,
+			);
+			this.addDiscoveredPromptStatusIfOverridden(
+				options.kind,
+				"project",
+				options.projectPath,
+				projectExists && projectTrusted,
+				activeCliPathKeys,
+			);
+			for (const entry of options.cliSourceEntries) {
+				this.startupContextStatuses.push(this.createCliPromptFileStatus(options.kind, entry.source, entry.index));
+			}
+			return;
+		}
+
+		if (projectExists && projectTrusted) {
+			this.addDiscoveredPromptStatus(options.kind, "user", options.globalPath, globalExists, "overridden");
+			this.addDiscoveredPromptStatus(options.kind, "project", options.projectPath, true, "active");
+			return;
+		}
+
+		this.addDiscoveredPromptStatus(options.kind, "user", options.globalPath, globalExists, "active");
+	}
+
+	private addDiscoveredPromptStatusIfOverridden(
+		kind: PromptFileKind,
+		origin: "project" | "user",
+		path: string,
+		exists: boolean,
+		activeCliPathKeys: Set<string>,
+	): void {
+		this.addDiscoveredPromptStatus(
+			kind,
+			origin,
+			path,
+			exists && !activeCliPathKeys.has(pathIdentityKey(path)),
+			"overridden",
+		);
+	}
+
+	private addDiscoveredPromptStatus(
+		kind: PromptFileKind,
+		origin: "project" | "user",
+		path: string,
+		exists: boolean,
+		status: "active" | "overridden",
+	): void {
+		if (exists) {
+			this.startupContextStatuses.push({ kind, status, origin, path: resolve(path) });
+		}
+	}
+
+	private addAgentInstructionStatuses(
+		discoveredStatuses: StartupContextSourceStatus[],
+		agentInstructionFiles: AgentInstructionFile[],
+	): void {
+		const finalFilesByPath = new Map(agentInstructionFiles.map((file) => [pathIdentityKey(file.path), file]));
+		const emittedFinalPaths = new Set<string>();
+
+		for (const discoveredStatus of discoveredStatuses) {
+			if (discoveredStatus.kind !== "context") {
+				continue;
+			}
+
+			const pathKey = pathIdentityKey(discoveredStatus.path);
+			const finalFile = finalFilesByPath.get(pathKey);
+			if (finalFile) {
+				this.startupContextStatuses.push(this.createAgentInstructionStatus(finalFile, discoveredStatus.origin));
+				emittedFinalPaths.add(pathKey);
+				continue;
+			}
+
+			this.startupContextStatuses.push({ ...discoveredStatus, status: "overridden" });
+		}
+
+		for (const file of agentInstructionFiles) {
+			const pathKey = pathIdentityKey(file.path);
+			if (emittedFinalPaths.has(pathKey)) {
+				continue;
+			}
+			this.startupContextStatuses.push(this.createAgentInstructionStatus(file));
+		}
+	}
+
+	private createAgentInstructionStatus(
+		file: AgentInstructionFile,
+		origin: "project" | "user" = this.isUnderPath(resolve(file.path), this.agentDir) ? "user" : "project",
+	): AgentInstructionFileStatus {
+		return {
+			kind: "context",
+			status: "active",
+			origin,
+			path: resolve(file.path),
+			contextKind: file.contextKind,
+			fileName: file.fileName,
+		};
+	}
+
+	private createCliPromptFileStatus(kind: PromptFileKind, source: string, index?: number): StartupContextSourceStatus {
+		const filePath = this.resolvePromptSourceIfFile(source);
+		return {
+			kind,
+			status: "active",
+			origin: "cli",
+			label: kind === "system" ? "--system-prompt" : `--append-system-prompt #${index ?? 1}`,
+			...(index === undefined ? {} : { index }),
+			...(filePath ? { path: filePath } : {}),
+		};
 	}
 
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {
@@ -950,12 +1264,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private discoverSystemPromptFile(): string | undefined {
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md");
-		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
+		if (this.settingsManager.isProjectTrusted() && isExistingFile(projectPath)) {
 			return projectPath;
 		}
 
 		const globalPath = join(this.agentDir, "SYSTEM.md");
-		if (existsSync(globalPath)) {
+		if (isExistingFile(globalPath)) {
 			return globalPath;
 		}
 
@@ -964,12 +1278,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private discoverAppendSystemPromptFile(): string | undefined {
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md");
-		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
+		if (this.settingsManager.isProjectTrusted() && isExistingFile(projectPath)) {
 			return projectPath;
 		}
 
 		const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
-		if (existsSync(globalPath)) {
+		if (isExistingFile(globalPath)) {
 			return globalPath;
 		}
 

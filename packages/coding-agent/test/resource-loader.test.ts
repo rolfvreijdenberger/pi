@@ -354,6 +354,130 @@ Content`,
 			expect(agentsFiles.some((f) => f.path.includes("AGENTS.md"))).toBe(true);
 		});
 
+		it("should normalize agent instruction files returned from agentsFilesOverride", async () => {
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				agentsFilesOverride: () => ({
+					agentsFiles: [{ path: join(cwd, "virtual", "CLAUDE.md"), content: "Claude instructions" }],
+				}),
+			});
+			await loader.reload();
+
+			expect(loader.getAgentsFiles().agentsFiles).toEqual([
+				{
+					path: join(cwd, "virtual", "CLAUDE.md"),
+					content: "Claude instructions",
+					contextKind: "claude",
+					fileName: "CLAUDE.md",
+				},
+			]);
+		});
+
+		it("should keep overridden agent instruction statuses when agentsFilesOverride filters active files", async () => {
+			writeFileSync(join(cwd, "AGENTS.md"), "Project agent instructions");
+			writeFileSync(join(cwd, "CLAUDE.md"), "Project Claude instructions");
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				agentsFilesOverride: (current) => ({
+					agentsFiles: current.agentsFiles.filter((file) => file.fileName !== "AGENTS.md"),
+				}),
+			});
+			await loader.reload();
+
+			expect(loader.getAgentsFiles().agentsFiles).toEqual([]);
+			expect(
+				loader
+					.getStartupContextSourceStatuses()
+					.filter((file) => file.kind === "context" && file.path.startsWith(cwd)),
+			).toEqual([
+				{
+					kind: "context",
+					status: "overridden",
+					origin: "project",
+					path: join(cwd, "CLAUDE.md"),
+					contextKind: "claude",
+					fileName: "CLAUDE.md",
+				},
+				{
+					kind: "context",
+					status: "overridden",
+					origin: "project",
+					path: join(cwd, "AGENTS.md"),
+					contextKind: "agents",
+					fileName: "AGENTS.md",
+				},
+			]);
+		});
+
+		it("should report CLAUDE.md and CLAUDE.MD context files when they are loaded", async () => {
+			const parentDir = join(cwd, "nested");
+			const childDir = join(parentDir, "child");
+			mkdirSync(childDir, { recursive: true });
+			writeFileSync(join(agentDir, "CLAUDE.md"), "Global Claude instructions");
+			writeFileSync(join(parentDir, "CLAUDE.MD"), "Parent Claude instructions");
+
+			const loader = new DefaultResourceLoader({ cwd: childDir, agentDir });
+			await loader.reload();
+
+			const contextFilePaths = loader.getAgentsFiles().agentsFiles.map((file) => file.path.replace(/\\/g, "/"));
+			expect(contextFilePaths[0]).toBe(join(agentDir, "CLAUDE.md").replace(/\\/g, "/"));
+			expect(contextFilePaths.some((filePath) => filePath.toLowerCase().endsWith("/nested/claude.md"))).toBe(true);
+
+			const contextStatuses = loader.getStartupContextSourceStatuses().filter((file) => file.kind === "context");
+			expect(contextStatuses[0]).toEqual({
+				kind: "context",
+				status: "active",
+				origin: "user",
+				path: join(agentDir, "CLAUDE.md"),
+				contextKind: "claude",
+				fileName: "CLAUDE.md",
+			});
+			expect(
+				contextStatuses.some(
+					(file) =>
+						"path" in file &&
+						file.origin === "project" &&
+						file.path.replace(/\\/g, "/").toLowerCase().endsWith("/nested/claude.md"),
+				),
+			).toBe(true);
+		});
+
+		it("should prefer AGENTS.md over CLAUDE.md in the same directory and report CLAUDE.md overridden", async () => {
+			writeFileSync(join(cwd, "AGENTS.md"), "Project agent instructions");
+			writeFileSync(join(cwd, "CLAUDE.md"), "Project Claude instructions");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getAgentsFiles().agentsFiles.some((file) => file.path === join(cwd, "AGENTS.md"))).toBe(true);
+			expect(loader.getAgentsFiles().agentsFiles.some((file) => file.path === join(cwd, "CLAUDE.md"))).toBe(false);
+			expect(
+				loader
+					.getStartupContextSourceStatuses()
+					.filter((file) => file.kind === "context" && file.path.startsWith(cwd)),
+			).toEqual([
+				{
+					kind: "context",
+					status: "overridden",
+					origin: "project",
+					path: join(cwd, "CLAUDE.md"),
+					contextKind: "claude",
+					fileName: "CLAUDE.md",
+				},
+				{
+					kind: "context",
+					status: "active",
+					origin: "project",
+					path: join(cwd, "AGENTS.md"),
+					contextKind: "agents",
+					fileName: "AGENTS.md",
+				},
+			]);
+		});
+
 		it("should skip AGENTS.md and CLAUDE.md discovery when noContextFiles is true", async () => {
 			writeFileSync(join(cwd, "AGENTS.md"), "# Project Guidelines\n\nBe helpful.");
 			writeFileSync(join(cwd, "CLAUDE.md"), "# Claude Guidelines\n\nBe helpful.");
@@ -374,6 +498,20 @@ Content`,
 			await loader.reload();
 
 			expect(loader.getSystemPrompt()).toBe("You are a helpful assistant.");
+		});
+
+		it("should ignore prompt directories when discovering system prompt files", async () => {
+			const piDir = join(cwd, ".pi");
+			mkdirSync(join(piDir, "SYSTEM.md"), { recursive: true });
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBe("Global system prompt.");
+			expect(loader.getStartupContextSourceStatuses().filter((file) => file.kind === "system")).toEqual([
+				{ kind: "system", status: "active", origin: "user", path: join(agentDir, "SYSTEM.md") },
+			]);
 		});
 
 		it("should skip project resources that require trust when project is not trusted", async () => {
@@ -431,6 +569,182 @@ Project skill content`,
 			await loader.reload();
 
 			expect(loader.getAppendSystemPrompt()).toContain("Additional instructions.");
+		});
+
+		it("should report context file status in system, append, then hierarchical context order", async () => {
+			const piDir = join(cwd, ".pi");
+			mkdirSync(piDir, { recursive: true });
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			writeFileSync(join(piDir, "SYSTEM.md"), "Project system prompt.");
+			writeFileSync(join(agentDir, "APPEND_SYSTEM.md"), "Global append prompt.");
+			writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "Project append prompt.");
+			writeFileSync(join(agentDir, "AGENTS.md"), "Global instructions");
+			writeFileSync(join(cwd, "AGENTS.md"), "Project instructions");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const startupContextStatuses = loader.getStartupContextSourceStatuses();
+			expect(startupContextStatuses.filter((file) => file.kind !== "context")).toEqual([
+				{ kind: "system", status: "overridden", origin: "user", path: join(agentDir, "SYSTEM.md") },
+				{ kind: "system", status: "active", origin: "project", path: join(piDir, "SYSTEM.md") },
+				{
+					kind: "append-system",
+					status: "overridden",
+					origin: "user",
+					path: join(agentDir, "APPEND_SYSTEM.md"),
+				},
+				{
+					kind: "append-system",
+					status: "active",
+					origin: "project",
+					path: join(piDir, "APPEND_SYSTEM.md"),
+				},
+			]);
+
+			const contextStatuses = startupContextStatuses.filter((file) => file.kind === "context");
+			expect(contextStatuses[0]).toEqual({
+				kind: "context",
+				status: "active",
+				origin: "user",
+				path: join(agentDir, "AGENTS.md"),
+				contextKind: "agents",
+				fileName: "AGENTS.md",
+			});
+			expect(contextStatuses[contextStatuses.length - 1]).toEqual({
+				kind: "context",
+				status: "active",
+				origin: "project",
+				path: join(cwd, "AGENTS.md"),
+				contextKind: "agents",
+				fileName: "AGENTS.md",
+			});
+		});
+
+		it("should report CLI system prompt text without exposing its contents as context", async () => {
+			const piDir = join(cwd, ".pi");
+			mkdirSync(piDir, { recursive: true });
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			writeFileSync(join(piDir, "SYSTEM.md"), "Project system prompt.");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, systemPrompt: "literal secret prompt" });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBe("literal secret prompt");
+			expect(loader.getStartupContextSourceStatuses().filter((file) => file.kind !== "context")).toEqual([
+				{ kind: "system", status: "overridden", origin: "user", path: join(agentDir, "SYSTEM.md") },
+				{ kind: "system", status: "overridden", origin: "project", path: join(piDir, "SYSTEM.md") },
+				{ kind: "system", status: "active", origin: "cli", label: "--system-prompt" },
+			]);
+		});
+
+		it("should report CLI system prompt files while marking discovered files overridden", async () => {
+			const piDir = join(cwd, ".pi");
+			const cliSystemPrompt = join(tempDir, "cli-system.md");
+			mkdirSync(piDir, { recursive: true });
+			writeFileSync(cliSystemPrompt, "CLI system prompt.");
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			writeFileSync(join(piDir, "SYSTEM.md"), "Project system prompt.");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, systemPrompt: cliSystemPrompt });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBe("CLI system prompt.");
+			expect(loader.getStartupContextSourceStatuses().filter((file) => file.kind !== "context")).toEqual([
+				{ kind: "system", status: "overridden", origin: "user", path: join(agentDir, "SYSTEM.md") },
+				{ kind: "system", status: "overridden", origin: "project", path: join(piDir, "SYSTEM.md") },
+				{
+					kind: "system",
+					status: "active",
+					origin: "cli",
+					path: cliSystemPrompt,
+					label: "--system-prompt",
+				},
+			]);
+		});
+
+		it("should report existing CLI system prompt directories as literal labels, not files", async () => {
+			const cliSystemPromptDirectory = join(tempDir, "cli-system-dir");
+			mkdirSync(cliSystemPromptDirectory, { recursive: true });
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, systemPrompt: cliSystemPromptDirectory });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBe(cliSystemPromptDirectory);
+			expect(loader.getStartupContextSourceStatuses().filter((file) => file.kind === "system")).toEqual([
+				{ kind: "system", status: "active", origin: "cli", label: "--system-prompt" },
+			]);
+		});
+
+		it("should report CLI append system prompt sources in argument order", async () => {
+			const cliAppendPrompt = join(tempDir, "cli-append.md");
+			writeFileSync(cliAppendPrompt, "CLI append prompt.");
+			writeFileSync(join(agentDir, "APPEND_SYSTEM.md"), "Global append prompt.");
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				appendSystemPrompt: ["literal append secret", cliAppendPrompt],
+			});
+			await loader.reload();
+
+			expect(loader.getAppendSystemPrompt()).toEqual(["literal append secret", "CLI append prompt."]);
+			expect(loader.getStartupContextSourceStatuses().filter((file) => file.kind !== "context")).toEqual([
+				{
+					kind: "append-system",
+					status: "overridden",
+					origin: "user",
+					path: join(agentDir, "APPEND_SYSTEM.md"),
+				},
+				{
+					kind: "append-system",
+					status: "active",
+					origin: "cli",
+					label: "--append-system-prompt #1",
+					index: 1,
+				},
+				{
+					kind: "append-system",
+					status: "active",
+					origin: "cli",
+					path: cliAppendPrompt,
+					label: "--append-system-prompt #2",
+					index: 2,
+				},
+			]);
+		});
+
+		it("should dedupe CLI append files against discovered append files", async () => {
+			const piDir = join(cwd, ".pi");
+			mkdirSync(piDir, { recursive: true });
+			const projectAppendPrompt = join(piDir, "APPEND_SYSTEM.md");
+			writeFileSync(projectAppendPrompt, "Project append prompt.");
+			writeFileSync(join(agentDir, "APPEND_SYSTEM.md"), "Global append prompt.");
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				appendSystemPrompt: [join(".pi", "APPEND_SYSTEM.md"), projectAppendPrompt],
+			});
+			await loader.reload();
+
+			expect(loader.getAppendSystemPrompt()).toEqual(["Project append prompt."]);
+			expect(loader.getStartupContextSourceStatuses().filter((file) => file.kind !== "context")).toEqual([
+				{
+					kind: "append-system",
+					status: "overridden",
+					origin: "user",
+					path: join(agentDir, "APPEND_SYSTEM.md"),
+				},
+				{
+					kind: "append-system",
+					status: "active",
+					origin: "cli",
+					path: projectAppendPrompt,
+					label: "--append-system-prompt #1",
+					index: 1,
+				},
+			]);
 		});
 	});
 
